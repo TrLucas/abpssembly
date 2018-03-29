@@ -25,7 +25,9 @@ Nightly builds generation script
 
 import argparse
 import ConfigParser
+import binascii
 import base64
+import datetime
 import hashlib
 import hmac
 import json
@@ -39,11 +41,16 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from urllib import urlencode
 import urllib2
 import urlparse
 import zipfile
 import contextlib
+
+from Crypto.PublicKey import RSA
+from Crypto.Signature import PKCS1_v1_5
+import Crypto.Hash.SHA256
 
 from xml.dom.minidom import parse as parseXml
 
@@ -350,7 +357,7 @@ class NightlyBuild(object):
                 env = dict(env, SPIDERMONKEY_BINARY=spiderMonkeyBinary)
 
             command = [os.path.join(self.tempdir, 'build.py')]
-            if self.config.type == 'safari':
+            if self.config.type in {'safari', 'edge'}:
                 command.extend(['-t', self.config.type, 'build'])
             else:
                 command.extend(['build', '-t', self.config.type])
@@ -649,21 +656,72 @@ class NightlyBuild(object):
         if any(status not in ('OK', 'ITEM_PENDING_REVIEW') for status in response['status']):
             raise Exception({'status': response['status'], 'statusDetail': response['statusDetail']})
 
+    def generate_certificate_token_request(self, url, private_key):
+        # Construct the token request according to
+        # https://docs.microsoft.com/en-us/azure/active-directory/develop/active-directory-certificate-credentials
+        def base64url_encode(data):
+            return base64.urlsafe_b64encode(data).replace(b'=', b'')
+
+        segments = []
+
+        hex_val = binascii.a2b_hex(self.config.thumbprint)
+        x5t = base64.urlsafe_b64encode(hex_val).decode()
+
+        now = datetime.datetime.now()
+        minutes = datetime.timedelta(0, 0, 0, 0, 10)
+        expires = now + minutes
+
+        # generate the full jwt body
+        jwt_payload = {
+            'aud': url,
+            'iss': self.config.clientID,
+            'sub': self.config.clientID,
+            'nbf': int(time.mktime(now.timetuple())),
+            'exp': int(time.mktime(expires.timetuple())),
+            'jti': str(uuid.uuid4()),
+        }
+
+        jwt_headers = {'typ': 'JWT', 'alg': 'RS256', 'x5t': x5t}
+
+        # sign the jwt body with the given private key
+        key = RSA.importKey(private_key)
+
+        segments.append(base64url_encode(json.dumps(jwt_headers)))
+        segments.append(base64url_encode(json.dumps(jwt_payload)))
+
+        body = b'.'.join(segments)
+        signature = PKCS1_v1_5.new(key).sign(Crypto.Hash.SHA256.new(body))
+
+        segments.append(base64url_encode(signature))
+        signed_jwt = b'.'.join(segments)
+
+        # generate oauth parameters for login.microsoft.com
+        oauth_params = {
+            'grant_type': 'client_credentials',
+            'client_id': self.config.clientID,
+            'resource': 'https://graph.windows.net',
+            'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-'
+                                     'type:jwt-bearer',
+            'client_assertion': signed_jwt,
+        }
+
+        request = urllib2.Request(url, urlencode(oauth_params))
+        request.get_method = lambda: 'POST'
+
+        return request
+
     def get_windows_store_access_token(self):
-        # use refresh token to obtain a valid access token
-        # https://docs.microsoft.com/en-us/azure/active-directory/active-directory-protocols-oauth-code#refreshing-the-access-tokens
-        server = 'https://login.microsoftonline.com'
-        token_path = '{}/{}/oauth2/token'.format(server, self.config.tenantID)
+        # use client certificate to obtain a valid access token
+        url = 'https://login.microsoftonline.com/{}/oauth2/token'.format(
+            self.config.tenantID
+        )
+
+        with open(self.config.privateKey, 'r') as fp:
+            private_key = fp.read()
 
         opener = urllib2.build_opener(HTTPErrorBodyHandler)
-        post_data = urlencode([
-            ('refresh_token', self.config.refreshToken),
-            ('client_id', self.config.clientID),
-            ('client_secret', self.config.clientSecret),
-            ('grant_type', 'refresh_token'),
-            ('resource', 'https://graph.windows.net')
-        ])
-        request = urllib2.Request(token_path, post_data)
+        request = self.generate_certificate_token_request(url, private_key)
+
         with contextlib.closing(opener.open(request)) as response:
             data = json.load(response)
             auth_token = '{0[token_type]} {0[access_token]}'.format(data)
@@ -814,7 +872,7 @@ class NightlyBuild(object):
                 self.uploadToMozillaAddons()
             elif self.config.type == 'chrome' and self.config.clientID and self.config.clientSecret and self.config.refreshToken:
                 self.uploadToChromeWebStore()
-            elif self.config.type == 'edge' and self.config.clientID and self.config.clientSecret and self.config.refreshToken and self.config.tenantID:
+            elif self.config.type == 'edge' and self.config.clientID and self.config.tenantID and self.config.privateKey and self.config.thumbprint:
                 self.upload_to_windows_store()
 
         finally:

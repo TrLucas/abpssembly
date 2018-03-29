@@ -155,6 +155,8 @@ class Configuration(object):
     downloadPage = _defineProperty('downloadPage', local=True, default='')
     clientID = _defineProperty('clientID', local=True, default='')
     clientSecret = _defineProperty('clientSecret', local=True, default='')
+    privateKey = _defineProperty('privateKey', local=True, default='')
+    thumbprint = _defineProperty('thumbprint', local=True, default='')
     refreshToken = _defineProperty('refreshToken', local=True, default='')
     tenantID = _defineProperty('tenantID', local=True, default='')
     revision = _defineProperty('revision', local=True, default='master')
