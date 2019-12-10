@@ -358,6 +358,10 @@ class NightlyBuild(object):
             if spiderMonkeyBinary:
                 env = dict(env, SPIDERMONKEY_BINARY=spiderMonkeyBinary)
 
+            if os.path.exists(os.path.join(self.tempdir, 'package.json')):
+                npm_command = ['npm', 'install']
+                subprocess.check_call(npm_command, env=env, cwd=self.tempdir)
+
             command = [os.path.join(self.tempdir, 'build.py')]
             command.extend(['build', '-t', self.config.type, '-b',
                             self.buildNum])
